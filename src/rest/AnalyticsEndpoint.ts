@@ -38,7 +38,7 @@ export class AnalyticsEndpoint {
   constructor(public options: IAnalyticsEndpointOptions) {
     this.logger = new Logger(this);
 
-    var endpointCallerOptions: IEndpointCallerOptions = {
+    const endpointCallerOptions: IEndpointCallerOptions = {
       accessToken: (this.options.token && this.options.token != '') ? this.options.token : null
     };
     this.endpointCaller = new EndpointCaller(endpointCallerOptions);
@@ -54,7 +54,7 @@ export class AnalyticsEndpoint {
       if (this.getCurrentVisitId()) {
         resolve(this.getCurrentVisitId());
       } else {
-        var url = this.buildAnalyticsUrl('/analytics/visit');
+        const url = this.buildAnalyticsUrl('/analytics/visit');
         this.getFromService<IAPIAnalyticsVisitResponseRest>(url, {})
           .then((response: IAPIAnalyticsVisitResponseRest) => {
             this.visitId = response.id;
@@ -77,7 +77,7 @@ export class AnalyticsEndpoint {
   public sendDocumentViewEvent(documentViewEvent: IClickEvent): Promise<IAPIAnalyticsEventResponse> {
     Assert.exists(documentViewEvent);
     this.logger.info('Logging analytics document view', documentViewEvent);
-    return this.sendToService(documentViewEvent, 'click', 'clickEvent');
+    return this.sendToService(documentViewEvent, 'click', 'clickEvent', true);
   }
 
   public sendCustomEvent(customEvent: ICustomEvent) {
@@ -87,13 +87,13 @@ export class AnalyticsEndpoint {
   }
 
   public getTopQueries(params: ITopQueries): Promise<string[]> {
-    var url = this.buildAnalyticsUrl('/stats/topQueries');
+    const url = this.buildAnalyticsUrl('/stats/topQueries');
     return this.getFromService<string[]>(url, params);
   }
 
-  private sendToService<D, R>(data: D, path: string, paramName: string): Promise<R> {
-    var url = QueryUtils.mergePath(this.options.serviceUrl, '/rest/' + (AnalyticsEndpoint.CUSTOM_ANALYTICS_VERSION || AnalyticsEndpoint.DEFAULT_ANALYTICS_VERSION) + '/analytics/' + path);
-    var queryString = [];
+  private sendToService<D, R>(data: D, path: string, paramName: string, willCausePageUnload = false): Promise<R> {
+    const url = QueryUtils.mergePath(this.options.serviceUrl, '/rest/' + (AnalyticsEndpoint.CUSTOM_ANALYTICS_VERSION || AnalyticsEndpoint.DEFAULT_ANALYTICS_VERSION) + '/analytics/' + path);
+    const queryString = [];
 
     if (this.organization) {
       queryString.push('org=' + this.organization);
@@ -102,32 +102,41 @@ export class AnalyticsEndpoint {
       queryString.push('visitor=' + encodeURIComponent(Cookie.get('visitorId')));
     }
 
-    // We use pendingRequest because we don't want to have 2 request to analytics at the same time.
-    // Otherwise the cookie visitId won't be set correctly.
-    if (AnalyticsEndpoint.pendingRequest == null) {
-      AnalyticsEndpoint.pendingRequest = this.endpointCaller.call<R>({
-        errorsAsSuccess: false,
-        method: 'POST',
-        queryString: queryString,
-        requestData: data,
-        url: url,
-        responseType: 'text',
-        requestDataType: 'application/json'
-      }).then((res: ISuccessResponse<R>) => {
-        return this.handleAnalyticsEventResponse(<any>res.data);
-      }).finally(() => {
-        AnalyticsEndpoint.pendingRequest = null;
-      });
-      return AnalyticsEndpoint.pendingRequest;
+    if (willCausePageUnload) {
+      this.sendDataBeforeUnload(url, queryString, data);
     } else {
-      return AnalyticsEndpoint.pendingRequest.finally(() => {
-        return this.sendToService<D, R>(data, path, paramName);
-      });
+      // We use pendingRequest because we don't want to have 2 request to analytics at the same time.
+      // Otherwise the cookie visitId won't be set correctly.
+      if (AnalyticsEndpoint.pendingRequest == null) {
+        return this.sendUsingEndpointCaller<R>(url, queryString, data);
+      } else {
+        return AnalyticsEndpoint.pendingRequest.finally(() => {
+          return this.sendToService<D, R>(data, path, paramName);
+        });
+      }
     }
   }
 
+  private sendUsingEndpointCaller<R>(url, queryString, data) {
+    AnalyticsEndpoint.pendingRequest = this.endpointCaller.call<R>({
+      errorsAsSuccess: false,
+      method: 'POST',
+      queryString: queryString,
+      requestData: data,
+      url: url,
+      responseType: 'text',
+      requestDataType: 'application/json'
+    }).then((res: ISuccessResponse<R>) => {
+      return this.handleAnalyticsEventResponse(<any>res.data);
+    }).finally(() => {
+      AnalyticsEndpoint.pendingRequest = null;
+    });
+
+    return AnalyticsEndpoint.pendingRequest;
+  }
+
   private getFromService<T>(url: string, params: IStringMap<string>): Promise<T> {
-    var paramsToSend = (this.options.token && this.options.token != '') ? _.extend({ 'access_token': this.options.token }, params) : params;
+    const paramsToSend = (this.options.token && this.options.token != '') ? _.extend({ 'access_token': this.options.token }, params) : params;
     return this.endpointCaller.call<T>({
       errorsAsSuccess: false,
       method: 'GET',
@@ -141,8 +150,8 @@ export class AnalyticsEndpoint {
   }
 
   private handleAnalyticsEventResponse(response: IAPIAnalyticsEventResponse | IAPIAnalyticsSearchEventsResponse) {
-    var visitId: string;
-    var visitorId: string;
+    let visitId: string;
+    let visitorId: string;
 
     if (response['visitId']) {
       visitId = response['visitId'];
@@ -165,5 +174,33 @@ export class AnalyticsEndpoint {
 
   private buildAnalyticsUrl(path: string) {
     return this.options.serviceUrl + '/rest/' + (AnalyticsEndpoint.CUSTOM_ANALYTICS_VERSION || AnalyticsEndpoint.DEFAULT_ANALYTICS_VERSION) + path;
+  }
+
+  private sendDataBeforeUnload<D>(url: string, queryString: string[], data: D) {
+    if (navigator && navigator.sendBeacon) {
+      this.sendDataBeforeUnloadUsingBeacon(url, queryString, data);
+    } else {
+      this.sendDataBeforeUnloadUsingHack(url, queryString, data);
+    }
+  }
+
+  private sendDataBeforeUnloadUsingBeacon<D>(url: string, queryString: string[], data: D) {
+    const headers = {
+      type: 'application/json'
+    };
+    const blob = new Blob([JSON.stringify(data)], headers);
+    // sendBeacon only support a 'type' attribute in the header.
+    // it does not support authorization header
+    // it needs to be added in the query string ...
+    navigator.sendBeacon(this.endpointCaller.combineUrlAndQueryString(url, queryString.concat([`access_token=${this.options.token}`])), blob);
+  }
+
+  private sendDataBeforeUnloadUsingHack<D>(url: string, queryString: string[], data: D) {
+    const img = new Image();
+    this.sendUsingEndpointCaller(url, queryString, data);
+    
+    window.addEventListener('beforeunload', () => {
+      img.src = 'https://static.cloud.coveo.com/searchui/v1.2537/image/spritesNew.png';
+    });
   }
 }

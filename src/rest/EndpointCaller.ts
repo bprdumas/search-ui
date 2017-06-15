@@ -484,7 +484,7 @@ export class EndpointCaller {
     error(queryError);
   }
 
-  private combineUrlAndQueryString(url: String, queryString: string[]): string {
+  public combineUrlAndQueryString(url: String, queryString: string[]): string {
     var questionMark = '?';
     if (url.match(/\?$/)) {
       questionMark = '';
@@ -528,7 +528,7 @@ export class EndpointCaller {
     }
   }
 
-  private buildRequestHeaders<T>(requestInfo: IRequestInfo<T>): IStringMap<string> {
+  public buildRequestHeaders<T>(requestInfo: IRequestInfo<T>): IStringMap<string> {
     let headers: IStringMap<string> = {};
     if (this.options.accessToken) {
       headers['Authorization'] = `Bearer ${this.options.accessToken}`;
